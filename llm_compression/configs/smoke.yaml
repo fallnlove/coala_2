@@ -1,0 +1,47 @@
+# Fast GPU smoke test: tiny random Llama, real calibration->inject->eval path.
+model:
+  id: hf-internal-testing/tiny-random-LlamaForCausalLM
+  load_dtype: float32
+  inference_dtype: float16
+  device: cuda
+  trust_remote_code: false
+  tokenizer:
+    use_fast: true
+
+compress:
+  enabled: true
+  strategy: svd_llm
+  ratio: 0.5
+  fp16: false
+  adaptive_rank: false
+  target_modules: [q_proj, k_proj, v_proj, o_proj, up_proj, gate_proj]
+  params:
+    accumulate: 0
+  save:
+    enabled: false
+
+calibration:
+  dataset: wikitext2
+  seq_len: 32
+  num_samples: 8
+  batch_size: 2
+  dataset_cache_dir: ./datasets
+  data_cache_dir: ./data_cache
+
+eval:
+  perplexity:
+    enabled: true
+    dtype: float32        # perplexity in fp32 (fp16 log_softmax overflows -> inf ppl)
+    datasets: [wikitext2]
+    seq_len: 32
+    num_samples: 8
+    batch_size: 1
+  reasoning:
+    enabled: true
+    dtype: float16        # reasoning in fp16
+    tasks: [piqa]
+    num_fewshot: 0
+    batch_size: 8
+
+seed: 0
+results_path: ./outputs/smoke_results.json

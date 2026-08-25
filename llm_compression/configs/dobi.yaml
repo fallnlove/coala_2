@@ -1,0 +1,79 @@
+# Dobi-SVD compression: differentiable rank selection + IPCA weight update.
+# Two stages (rank choice, then compression) — no remapping/quantization.
+model:
+  id: meta-llama/Llama-3.2-1B
+  load_dtype: float16        # required: the Dobi SVD layer emits fp16 activations
+  inference_dtype: float16
+  device: cuda
+  trust_remote_code: false
+  tokenizer:
+    use_fast: true
+
+compress:
+  enabled: true
+  strategy: dobi
+  ratio: 0.5                 # target parameter-budget ratio in (0, 1]
+  dobi:
+    rank_selection:          # stage 1 — train per-layer truncation (gamma)
+      dataset: c4     # wikitext2 | c4 | ptb (distinct samples if == calibration)
+      num_samples: 256       # Dobi n_train_samples
+      seq_len: 2048
+      n_epochs: 20           # Dobi n_train_epochs
+      lr: 5.0                # Dobi scheduler_lr (Adam)
+      scheduler_min_lr: 4.0
+      gradient_accumulation_steps: 1
+      beta: 10               # tanh steepness of the smooth truncation gate
+      lambda_reg: 200        # compression-ratio regularization weight
+      val_num_samples: 0     # held-out val windows (validation split, eval-protocol
+                             # ppl) logged per epoch + init reference; 0 = off
+      early_stopping_patience: 0     # stop after N epochs w/ no val-ppl improvement (0=off)
+      early_stopping_min_delta: 0.0  # min val-ppl decrease to count as improvement
+      seed: 0
+      low_mem: false         # opt-in: keep the base model in its loaded dtype
+                             # (requires load_dtype=bfloat16) instead of the fp32
+                             # rank-training upcast; SVD/gamma math stays fp32 per
+                             # layer and the layer forward is checkpointed (SVDs
+                             # recomputed in backward). Fits Qwen3-32B on one H200.
+      # Differentiable-SVD implementation for rank training:
+      svd: stable            # stable (Dobi lowrank+Taylor) | cans (cans_svd polar)
+      cans_eps: 1e-8         # cans backward regularization eps (svd=cans only)
+      cans_differentiation: tikhonov  # tikhonov | pseudo (svd=cans only)
+      # Rank checkpointing: persist the selected per-layer ranks so the slow
+      # rank-selection stage runs once and can be reused/resumed.
+      checkpoint: ./outputs/dobi_ranks.json  # save/load ranks here (null to disable)
+      checkpoint_every: 5    # also save every N epochs during training (0 = end only)
+      resume: true           # if the checkpoint exists, load it and skip rank training
+    stop_after_ranks: false  # true => exit after rank selection (no IPCA / eval)
+  save:
+    enabled: false
+    output_dir: ./outputs/compressed
+    max_shard_size: 1GB
+    save_ranks: true         # saves the per-layer gamma dict
+
+calibration:                 # stage 2 — IPCA weight-update samples
+  dataset: c4                # wikitext2 | c4 | ptb
+  seq_len: 2048
+  num_samples: 256
+  batch_size: 1
+  dataset_cache_dir: ./datasets
+  data_cache_dir: ./data_cache
+
+eval:
+  perplexity:
+    enabled: true
+    dtype: float32           # perplexity in fp32 (fp16 log_softmax overflows -> inf)
+    datasets: [wikitext2, ptb, c4]
+    contiguous: [ptb]
+    contiguous_split: test
+    seq_len: 2048
+    num_samples: 256
+    batch_size: 1
+  reasoning:
+    enabled: true
+    dtype: float16
+    tasks: [piqa, hellaswag, boolq, winogrande, arc_easy, arc_challenge, openbookqa]
+    num_fewshot: 0
+    batch_size: 8
+
+seed: 0
+results_path: ./outputs/dobi_results.json

@@ -1,0 +1,22 @@
+name: coala_env
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - torch==2.5.1
+      - transformers==4.48.3
+      - lm_eval==0.4.8
+      - peft==0.14.0
+      - datasets==3.3.0
+      - accelerate>=0.34,<1.1
+      - numpy==1.26.4
+      - omegaconf==2.3.0
+      - huggingface-hub==0.30.2
+      - tokenizers==0.21.1
+      - scipy==1.15.2
+      - scikit-learn==1.6.1
+      - pandas==2.2.3
+      - tqdm==4.67.1
+      - pytest>=8

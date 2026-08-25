@@ -1,0 +1,98 @@
+model:
+  id: mistralai/Mistral-7B-v0.1
+  load_dtype: float32        # rank training is fp32 (fp16 backward -> NaN gammas)
+  inference_dtype: float16
+  device: cuda
+  trust_remote_code: false
+  tokenizer:
+    use_fast: true
+
+compress:
+  enabled: true
+  strategy: coala
+  ratio: 0.8                 # global parameter-budget target (matches the table)
+  fp16: false
+  adaptive_rank: false
+  rank_source: train         # uniform | train | checkpoint
+  target_modules: [q_proj, k_proj, v_proj, o_proj, up_proj, gate_proj, down_proj]
+  params:                    # COMPRESSION-stage solver params (unused: stop_after_ranks)
+    accumulate: 8
+    mu: 0.0
+    adaptive: false
+    log_norms: false
+  coala_rank_selection:      # SELECTION-stage (train the rank gate)
+    trainer: gate            
+    rf_samples: 4            # independent rank-vectors per window (LOO baseline; >=2)
+    rf_budget: penalty      
+    rf_w_ce: 1.0             # reward = -(w_ce*CE + w_kl*KL + w_hidden*HID)
+    rf_w_kl: 0.0             
+    rf_w_hidden: 0.0         # hidden-state relative-L2 matching (embeddings excluded)
+    rf_w_entropy: 0.0        # entropy bonus (exploration); requires rf_learn_sigma
+    rf_learn_sigma: true     # per-layer sigma = sigma_min + softplus(scale*rho), trained
+    rf_sigma_lr_scale: 0.1  
+    rf_sigma_init: 0.05      
+    rf_sigma_final: 0.005    # inert when rf_learn_sigma=true
+    rf_sigma_min: 1.0        # absolute sigma floor in ranks (keeps gradients alive)
+    rf_adv_ema_beta: 0.99    # EMA of mean_i(A_i^2) for advantage normalization
+    rf_adv_std_floor: 1.0e-3 # below ~1e-3 nats of reward spread, don't amplify noise
+    # ---------------------------------------------------
+    dataset: c4              # train split for windows; val uses the validation split
+    num_samples: 256
+    val_num_samples: 64      # held-out c4 validation windows (eval-protocol ppl)
+    seq_len: 2048
+    n_epochs: 20
+    lr: 5.0                  # swept
+    scheduler_min_lr: 4.0
+    gradient_accumulation_steps: 1
+    beta: 10
+    lambda_reg: 200          # swept (compression-ratio penalty weight)
+    early_stopping_patience: 0   # run all epochs; best-val gammas still restored
+    early_stopping_min_delta: 0.0
+    seed: 0
+    accumulate: 2             
+    max_rank_ratio: 2.0      # 2x r_uni headroom; ~27.5GB fp32 factors fit the 80GB A100
+    low_mem: false           
+    ratio_objective: params  
+    init_checkpoint: null    
+    use_regularization: false  # plain COALA basis (no mu) — the experiment's premise
+    adaptive: false
+    mu: 1.0
+    cans_eps: 1.0e-8
+    cans_differentiation: tikhonov
+    checkpoint: ./outputs/coala_ranktrain/ranks.json   # per-task override in sbatch
+    checkpoint_every: 5
+    resume: false            # always train fresh
+  stop_after_ranks: true     # rank training only; compare by val ppl
+  save:
+    enabled: false
+    output_dir: ./outputs/compressed
+    max_shard_size: 1GB
+    save_ranks: true
+
+calibration:                 # COMPRESSION-stage calibration (unused under stop_after_ranks)
+  dataset: c4
+  seq_len: 2048
+  num_samples: 256
+  batch_size: 4
+  dataset_cache_dir: ./datasets
+  data_cache_dir: ./data_cache
+
+eval:                        # not run under stop_after_ranks (kept for a later compress run)
+  perplexity:
+    enabled: true
+    dtype: float32
+    datasets: [wikitext2, ptb, c4]
+    contiguous: [ptb]
+    contiguous_split: test
+    seq_len: 2048
+    num_samples: 256
+    batch_size: 1
+  reasoning:
+    enabled: true
+    dtype: float16
+    tasks: [piqa, hellaswag, boolq, winogrande, arc_easy, arc_challenge, openbookqa]
+    num_fewshot: 0
+    batch_size: 8
+
+seed: 0
+results_path: ./outputs/coala_ranktrain/results.json

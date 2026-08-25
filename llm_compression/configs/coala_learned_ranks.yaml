@@ -1,0 +1,84 @@
+# COALA with LEARNED non-uniform per-layer ranks (Dobi-style rank selection).
+# Two stages: (1) train per-layer ranks by differentiating through COALA via
+# cans_svd, then (2) normal COALA compression at those ranks.
+model:
+  id: meta-llama/Llama-3.2-1B
+  load_dtype: float32        # compression solve in fp32
+  inference_dtype: float16
+  device: cuda
+  trust_remote_code: false
+  tokenizer:
+    use_fast: true
+
+compress:
+  enabled: true
+  strategy: coala
+  ratio: 0.5                 # global parameter-budget target in (0, 1]
+  fp16: false
+  adaptive_rank: false       # only used when rank_source=uniform
+  rank_source: train         # uniform | train | checkpoint
+  target_modules: [q_proj, k_proj, v_proj, o_proj, up_proj, gate_proj, down_proj]
+  params:                    # COMPRESSION-stage solver params (COALA_Linear)
+    accumulate: 8
+    mu: 1.0
+    adaptive: true
+    log_norms: false
+  coala_rank_selection:      # SELECTION-stage (train the rank gate) — independent of params
+    dataset: c4              # wikitext2 | c4 | ptb (distinct samples if == calibration)
+    num_samples: 256
+    val_num_samples: 32      # held-out windows for val-ppl logging + early stop (0=off)
+    seq_len: 2048
+    n_epochs: 20             # upper bound on epochs (early stopping may cut it short)
+    lr: 5.0
+    scheduler_min_lr: 4.0
+    gradient_accumulation_steps: 1
+    beta: 10                 # tanh steepness of the rank gate
+    lambda_reg: 200          # compression-ratio regularization weight
+    early_stopping_patience: 3     # stop after N epochs w/ no val-ppl improvement (0=off)
+    early_stopping_min_delta: 0.0  # min val-ppl decrease to count as improvement
+    seed: 0
+    accumulate: 8            # activation TSQR compaction for X collection
+    max_rank_ratio: 2.0      # K = min(m,n, ceil(max_rank_ratio * r_uniform)); GPU-memory cap
+    # how the trained subspace U is built (cans_svd replaces torch.linalg.svd):
+    use_regularization: true # build U from weight_approx_with_regularization (mu) vs plain
+    adaptive: false          # scale selection-mu by per-layer error (like Linear.py)
+    mu: 1.0
+    cans_eps: 1.0e-8         # cans_svd backward regularization eps
+    cans_differentiation: tikhonov   # tikhonov | pseudo
+    checkpoint: ./outputs/coala_ranks.json
+    checkpoint_every: 5
+    resume: true
+  stop_after_ranks: false    # true => exit after writing ranks (no compression/eval)
+  save:
+    enabled: false
+    output_dir: ./outputs/compressed
+    max_shard_size: 1GB
+    save_ranks: true
+
+calibration:                 # COMPRESSION-stage calibration (COALA solve)
+  dataset: c4
+  seq_len: 2048
+  num_samples: 256
+  batch_size: 4
+  dataset_cache_dir: ./datasets
+  data_cache_dir: ./data_cache
+
+eval:
+  perplexity:
+    enabled: true
+    dtype: float32
+    datasets: [wikitext2, ptb, c4]
+    contiguous: [ptb]
+    contiguous_split: test
+    seq_len: 2048
+    num_samples: 256
+    batch_size: 1
+  reasoning:
+    enabled: true
+    dtype: float16
+    tasks: [piqa, hellaswag, boolq, winogrande, arc_easy, arc_challenge, openbookqa]
+    num_fewshot: 0
+    batch_size: 8
+
+seed: 0
+results_path: ./outputs/coala_learned_ranks_results.json

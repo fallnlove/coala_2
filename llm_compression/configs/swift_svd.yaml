@@ -1,0 +1,52 @@
+model:
+  id: mistralai/Mistral-7B-v0.1
+  load_dtype: float32
+  inference_dtype: float16
+  device: cuda
+  trust_remote_code: false
+  tokenizer:
+    use_fast: true
+
+compress:
+  enabled: true
+  strategy: swift_svd
+  ratio: 0.6
+  fp16: false
+  adaptive_rank: false      # must stay false: Swift-SVD allocates its own ranks
+  rank_source: uniform      # uniform | swift (Algorithm 2) | checkpoint
+  target_modules: [q_proj, k_proj, v_proj, o_proj, up_proj, gate_proj, down_proj]
+  params:
+    accumulate: 8           # COALA activation-hook QR compaction factor
+  save:
+    enabled: false
+    output_dir: ./outputs/compressed
+    max_shard_size: 1GB
+    save_ranks: true
+
+calibration:                # author defaults: C4, N=256, seq_len 2048
+  dataset: c4
+  seq_len: 2048
+  num_samples: 256
+  batch_size: 4
+  dataset_cache_dir: ./datasets
+  data_cache_dir: ./data_cache
+
+eval:
+  perplexity:
+    enabled: true
+    dtype: float32        # perplexity in fp32 (fp16 log_softmax overflows -> inf ppl)
+    datasets: [wikitext2, ptb, c4]
+    contiguous: [ptb]       # whole-corpus contiguous protocol (paper-comparable)
+    contiguous_split: test  # split used for contiguous datasets
+    seq_len: 2048
+    num_samples: 256        # sampled windows for non-contiguous datasets (wiki/c4)
+    batch_size: 1
+  reasoning:
+    enabled: true
+    dtype: float16        # reasoning in fp16
+    tasks: [piqa, hellaswag, boolq, winogrande, arc_easy, arc_challenge, openbookqa]
+    num_fewshot: 0
+    batch_size: 8
+
+seed: 0
+results_path: ./outputs/swift_svd_results.json

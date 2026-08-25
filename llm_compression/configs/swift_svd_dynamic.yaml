@@ -1,0 +1,85 @@
+# Swift-SVD* (ICML 2026, arXiv:2604.01609) — DYNAMIC ranks (paper Algorithm 2).
+#
+# Training-free two-stage run in a single pass:
+#   1. calibration activations -> per-layer spectrum of Z = W X  (loss curve for free)
+#   2. layer importance (ShortGPT Block Influence) + Algorithm 2 allocation, one
+#      candidate per alpha, each scored by held-out perplexity; best alpha wins.
+#
+# Budget: per module type, sum_i rank_i == kbar * n_layers exactly (kbar = COALA's
+# uniform rank), so Swift-SVD* is strictly budget-matched to the uniform baselines.
+model:
+  id: mistralai/Mistral-7B-v0.1
+  load_dtype: float32
+  inference_dtype: float16
+  device: cuda
+  trust_remote_code: false
+  tokenizer:
+    use_fast: true
+
+compress:
+  enabled: true
+  strategy: swift_svd
+  ratio: 0.6
+  fp16: false
+  adaptive_rank: false
+  rank_source: swift        # run Algorithm 2 (use 'checkpoint' to reuse ranks)
+  stop_after_ranks: false   # true = allocate + save ranks, skip compression/eval
+  target_modules: [q_proj, k_proj, v_proj, o_proj, up_proj, gate_proj, down_proj]
+  params:
+    accumulate: 8
+  swift_rank_selection:
+    delta: 0.5              # retained ratio: guaranteed rank = delta*kbar per layer
+    # Paper grid (11 candidates). The released script hard-codes alpha=0.6 and does
+    # no search -> set alphas: [0.6] to reproduce it exactly.
+    alphas: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    score: tail             # tail = beta^a * log(e + eps@kbar)^(1-a)  [paper, Alg. 2]
+                            # ynorm = beta^a * log(1 + ||Y||_F)^(1-a)  [released code]
+    base_rank: delta_kbar   # delta_kbar = floor(delta*kbar)           [paper, Alg. 2]
+                            # released    = int(0.25*ratio*out_features)
+    val:                    # held-out windows scoring each candidate
+      dataset: c4
+      num_samples: 64
+      seq_len: 2048
+    importance:             # ShortGPT Block Influence (author defaults)
+      dataset: c4
+      num_samples: 256
+      seq_len: 256
+      angular: false        # false = 1-cos (author default), true = arccos/pi
+    cache_dtype: float16    # CPU projector cache (float32 = exact, 2x host RAM)
+    checkpoint: ./outputs/swift/mistral7b_r06_ranks.json
+    importance_path: ./outputs/swift/mistral7b_importance.json
+    resume: false           # true = reuse the checkpoint instead of re-selecting
+    seed: 0
+  save:
+    enabled: false
+    output_dir: ./outputs/compressed
+    max_shard_size: 1GB
+    save_ranks: true
+
+calibration:
+  dataset: c4
+  seq_len: 2048
+  num_samples: 256
+  batch_size: 4
+  dataset_cache_dir: ./datasets
+  data_cache_dir: ./data_cache
+
+eval:
+  perplexity:
+    enabled: true
+    dtype: float32
+    datasets: [wikitext2, ptb, c4]
+    contiguous: [ptb]
+    contiguous_split: test
+    seq_len: 2048
+    num_samples: 256
+    batch_size: 1
+  reasoning:
+    enabled: true
+    dtype: float16
+    tasks: [piqa, hellaswag, boolq, winogrande, arc_easy, arc_challenge, openbookqa]
+    num_fewshot: 0
+    batch_size: 8
+
+seed: 0
+results_path: ./outputs/swift_svd_dynamic_results.json
